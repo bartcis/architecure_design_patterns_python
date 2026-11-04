@@ -86,7 +86,9 @@ The sample sessions in `data/logs.json` are dated around 10 October 2026. A shor
 
 ## Setup
 
-Use Python 3.9 or newer. Run these commands from the project root. The JSON paths are relative to that directory.
+Use Python 3.9 or newer. Run the commands for your operating system from the project root. The JSON paths are relative to that directory.
+
+macOS and Linux:
 
 ```bash
 python3 -m venv .venv
@@ -94,6 +96,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python app.py
 ```
+
+Windows (PowerShell):
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe app.py
+```
+
+The Windows commands install dependencies into the project's `.venv` instead of the system Python. This avoids permission errors when Python is installed in a protected location, such as `C:\Program Files\PsychoPy3`. Do not run pip with that installation's Python; use the `.venv` commands above.
 
 `requirements.txt` installs Flask, which runs the app, and Ruff, which checks and formats the Python files. The app listens on `http://127.0.0.1:5000`. On macOS, port 5000 is sometimes taken by AirPlay. If startup fails, change the port at the bottom of `app.py`.
 
