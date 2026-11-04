@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, request
 
-from decorators.request_log import REQUESTS, request_log
+from decorators.request_log import request_log
+from singletons.requests import RequestsSingleton
 
 app = Flask(__name__)
 
@@ -51,7 +52,7 @@ ACTIVITY_FOR_API = {
 @request_log
 def log_activity():
     return _log_activity()
-   
+
 
 def _log_activity():
     print("got a log request")
@@ -196,6 +197,7 @@ def undo_log():
     print("undid", removed)
     return jsonify(removed), 200
 
+
 @app.route("/notices", methods=["GET"])
 @request_log
 def list_notices():
@@ -214,14 +216,16 @@ def list_notices():
 @request_log
 def stats():
     print("got a stats request")
+    requests = RequestsSingleton.get_instance()
+    
     return jsonify(
         {
-            "count": REQUESTS["count"],
-            "last_path": REQUESTS["last_path"],
-            "last_seconds": REQUESTS["last_seconds"],
+            "count": requests.count,
+            "last_path": requests.last_path,
+            "last_seconds": requests.last_seconds,
         }
     )
-  
+
 
 @app.route("/activities", methods=["GET"])
 @request_log
