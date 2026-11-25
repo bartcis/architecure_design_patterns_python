@@ -1,51 +1,59 @@
 import json
 import urllib.parse
 import urllib.request
+from dataclasses import asdict
 from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, request
 
+from builders.calories_response import CaloriesResponseBuilder
 from decorators.request_log import request_log
+from factories.records import (
+    burned_calories,
+    create_activity_logged,
+    create_activity_record,
+    create_activity_records,
+    create_activity_request,
+    create_activity_response,
+    create_calories_log,
+    create_error,
+    create_log_records,
+    create_log_request,
+    create_log_response,
+    create_log_row,
+    create_macros_query,
+    create_notice_records,
+    create_period_request,
+    create_request_stats_response,
+    create_targets_response,
+    create_user_profile_response,
+    create_user_records,
+    create_user_request,
+    create_weekly_goal_reached,
+)
+from models.const import ACTIVITY_FOR_API, CAL_PER_HOUR, LIFESTYLE_ACTIVITY
+from models.enums import ActivityLevel, Gender, Period
 from singletons.requests import RequestsSingleton
 
 app = Flask(__name__)
 
-# Weekly calories burned while keeping the same body weight, adults age 19+.
-# min is the oldest age group, max is ages 19-30, daily figure times 7.
-# not active, little activity, active, very active: normal-weight U.S. adults,
-# National Academies of Sciences, Engineering, and Medicine, Dietary Reference
-# Intakes for Energy (2023), Appendix M, Tables M-3 and M-4.
-# moderate: Dietary Guidelines for Americans, 2020-2025, Table A2-2.
-LIFESTYLE_ACTIVITY = {
-    "not active": {
-        "male": {"min_calories_per_week": 13461, "max_calories_per_week": 18151},
-        "female": {"min_calories_per_week": 10955, "max_calories_per_week": 14105},
-    },
-    "little activity": {
-        "male": {"min_calories_per_week": 14791, "max_calories_per_week": 19572},
-        "female": {"min_calories_per_week": 12019, "max_calories_per_week": 15218},
-    },
-    "moderate": {
-        "male": {"min_calories_per_week": 15400, "max_calories_per_week": 19600},
-        "female": {"min_calories_per_week": 12600, "max_calories_per_week": 15400},
-    },
-    "active": {
-        "male": {"min_calories_per_week": 16079, "max_calories_per_week": 20804},
-        "female": {"min_calories_per_week": 12978, "max_calories_per_week": 16170},
-    },
-    "very active": {
-        "male": {"min_calories_per_week": 17745, "max_calories_per_week": 22883},
-        "female": {"min_calories_per_week": 14455, "max_calories_per_week": 17752},
-    },
-}
 
-ACTIVITY_FOR_API = {
-    "not active": "sedentary",
-    "little activity": "lightly_active",
-    "moderate": "moderately_active",
-    "active": "very_active",
-    "very active": "extra_active",
-}
+def read_json(path, default):
+    try:
+        with open(path, "r") as source:
+            return json.loads(source.read())
+    except Exception as err:
+        print("could not read", path, err)
+        return default
+
+
+def write_json(path, value):
+    with open(path, "w") as destination:
+        destination.write(json.dumps(value, indent=2))
+
+
+def error(message, status=400):
+    return jsonify(asdict(create_error(message))), status
 
 
 @app.route("/log", methods=["POST"])
@@ -55,186 +63,114 @@ def log_activity():
 
 
 def _log_activity():
-    print("got a log request")
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
-        return jsonify({"error": "body must be a json object"}), 400
+        return error("body must be a json object")
 
-    activity_type = body.get("type")
-    minutes = body.get("minutes")
-    if activity_type is None or minutes is None:
-        return jsonify({"error": "type and minutes are required"}), 400
+    incoming = create_log_request(body.get("type"), body.get("minutes"))
+    if incoming.type is None or incoming.minutes is None:
+        return error("type and minutes are required")
 
     try:
-        minutes = float(minutes)
+        minutes = float(incoming.minutes)
     except (TypeError, ValueError):
-        return jsonify({"error": "minutes must be a number"}), 400
-
+        return error("minutes must be a number")
     if minutes <= 0:
-        return jsonify({"error": "minutes must be greater than 0"}), 400
-
+        return error("minutes must be greater than 0")
     if minutes == int(minutes):
         minutes = int(minutes)
 
-    activities_file = open("data/activities.json", "r")
-    activities = json.loads(activities_file.read())
-    activities_file.close()
-
-    found = None
-    for row in activities:
-        if row["name"] == activity_type:
-            found = row
-            break
-
-    if found is None:
-        return jsonify({"error": "unknown activity"}), 400
-
-    calories = int(round(found["calories_per_60_min"] * minutes / 60))
-
-    try:
-        logs_file = open("data/logs.json", "r")
-        logs = json.loads(logs_file.read())
-        logs_file.close()
-    except Exception as err:
-        print("could not read logs", err)
-        logs = []
-
-    entry = {
-        "type": activity_type,
-        "minutes": minutes,
-        "logged_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-    }
-    logs.append(entry)
-
-    out = open("data/logs.json", "w")
-    out.write(json.dumps(logs, indent=2))
-    out.close()
-
-    print("saved", entry, "burned", calories)
-
-    week_start = datetime.now() - timedelta(days=7)
-    week_total = 0
-    for item in logs:
-        when = datetime.strptime(item["logged_at"], "%Y-%m-%dT%H:%M:%S")
-        if when < week_start or when > datetime.now():
-            continue
-        activities_file = open("data/activities.json", "r")
-        catalog = json.loads(activities_file.read())
-        activities_file.close()
-        per_hour = None
-        for row in catalog:
-            if row["name"] == item["type"]:
-                per_hour = row["calories_per_60_min"]
-                break
-        if per_hour is None:
-            continue
-        week_total = week_total + int(round(per_hour * float(item["minutes"]) / 60))
-
-    try:
-        notices_file = open("data/notices.json", "r")
-        notices = json.loads(notices_file.read())
-        notices_file.close()
-    except Exception as err:
-        print("could not read notices", err)
-        notices = []
-
-    notices.append(
-        {
-            "event": "activity_logged",
-            "type": entry["type"],
-            "minutes": entry["minutes"],
-            "calories": calories,
-            "at": entry["logged_at"],
-        }
+    activity_records = create_activity_records(read_json("data/activities.json", []))
+    found = next(
+        (row for row in activity_records if row.name == incoming.type),
+        None,
     )
-    if week_total >= 500:
-        notices.append(
+    if found is None:
+        return error("unknown activity")
+
+    calories = burned_calories(found.calories_per_60_min, minutes)
+    logged_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    entry = create_log_row(incoming.type, minutes, logged_at)
+
+    log_records = create_log_records(read_json("data/logs.json", []))
+    log_records.append(entry)
+    write_json("data/logs.json", [asdict(row) for row in log_records])
+
+    now = datetime.now()
+    week_start = now - timedelta(days=7)
+    week_total = 0
+    for item in log_records:
+        when = datetime.strptime(item.logged_at, "%Y-%m-%dT%H:%M:%S")
+        if not (week_start <= when <= now):
+            continue
+        row = next(
+            (activity for activity in activity_records if activity.name == item.type),
+            None,
+        )
+        if row is not None:
+            week_total += burned_calories(row.calories_per_60_min, item.minutes)
+
+    notice_records = create_notice_records(read_json("data/notices.json", []))
+    notice_records.append(
+        create_activity_logged(
             {
-                "event": "weekly_goal_reached",
-                "calories": week_total,
-                "goal": 500,
-                "at": entry["logged_at"],
+                "event": "activity_logged",
+                "type": entry.type,
+                "minutes": entry.minutes,
+                "calories": calories,
+                "at": entry.logged_at,
             }
         )
-        print("weekly goal reached", week_total)
+    )
+    if week_total >= 500:
+        notice_records.append(create_weekly_goal_reached(week_total, entry.logged_at))
 
-    notices_out = open("data/notices.json", "w")
-    notices_out.write(json.dumps(notices, indent=2))
-    notices_out.close()
-
-    return jsonify(
-        {
-            "type": entry["type"],
-            "minutes": entry["minutes"],
-            "calories": calories,
-            "logged_at": entry["logged_at"],
-            "weekly_calories": week_total,
-            "weekly_goal": 500,
-            "goal_reached": week_total >= 500,
-        }
-    ), 201
+    write_json("data/notices.json", [asdict(row) for row in notice_records])
+    response = create_log_response(
+        entry,
+        calories,
+        week_total,
+        500,
+        week_total >= 500,
+    )
+    return jsonify(asdict(response)), 201
 
 
 @app.route("/log/undo", methods=["POST"])
 @request_log
 def undo_log():
-    print("undo last log")
-    try:
-        logs_file = open("data/logs.json", "r")
-        logs = json.loads(logs_file.read())
-        logs_file.close()
-    except Exception as err:
-        print("could not read logs", err)
-        logs = []
-
-    if len(logs) == 0:
-        return jsonify({"error": "nothing to undo"}), 400
-
-    removed = logs.pop()
-    out = open("data/logs.json", "w")
-    out.write(json.dumps(logs, indent=2))
-    out.close()
-    print("undid", removed)
-    return jsonify(removed), 200
+    log_records = create_log_records(read_json("data/logs.json", []))
+    if not log_records:
+        return error("nothing to undo")
+    removed = log_records.pop()
+    write_json("data/logs.json", [asdict(row) for row in log_records])
+    return jsonify(asdict(removed)), 200
 
 
 @app.route("/notices", methods=["GET"])
 @request_log
 def list_notices():
-    print("got a notices request")
-    try:
-        notices_file = open("data/notices.json", "r")
-        notices = json.loads(notices_file.read())
-        notices_file.close()
-    except Exception as err:
-        print("could not read notices", err)
-        notices = []
-    return jsonify(notices)
+    notice_records = create_notice_records(read_json("data/notices.json", []))
+    return jsonify([asdict(row) for row in notice_records])
 
 
 @app.route("/stats", methods=["GET"])
 @request_log
 def stats():
-    print("got a stats request")
     requests = RequestsSingleton.get_instance()
-    
-    return jsonify(
-        {
-            "count": requests.count,
-            "last_path": requests.last_path,
-            "last_seconds": requests.last_seconds,
-        }
+    response = create_request_stats_response(
+        requests.count,
+        requests.last_path,
+        requests.last_seconds,
     )
+    return jsonify(asdict(response))
 
 
 @app.route("/activities", methods=["GET"])
 @request_log
 def list_activities():
-    print("got an activities list request")
-    activities_file = open("data/activities.json", "r")
-    activities = json.loads(activities_file.read())
-    activities_file.close()
-    return jsonify(activities)
+    activity_records = create_activity_records(read_json("data/activities.json", []))
+    return jsonify([asdict(row) for row in activity_records])
 
 
 @app.route("/activities", methods=["POST"])
@@ -244,49 +180,49 @@ def add_activity():
 
 
 def _add_activity():
-    print("got an add activity request")
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
-        return jsonify({"error": "body must be a json object"}), 400
+        return error("body must be a json object")
 
-    name = body.get("name")
-    calories_per_60_min = body.get("calories_per_60_min")
-    if name is None or calories_per_60_min is None:
-        return jsonify({"error": "name and calories_per_60_min are required"}), 400
-
-    if not isinstance(name, str) or name.strip() == "":
-        return jsonify({"error": "name must be a non-empty string"}), 400
-
-    name = name.strip()
+    incoming = create_activity_request(
+        body.get("name"),
+        body.get("calories_per_60_min"),
+    )
+    if incoming.name is None or incoming.calories_per_60_min is None:
+        return error("name and calories_per_60_min are required")
+    if not isinstance(incoming.name, str) or incoming.name.strip() == "":
+        return error("name must be a non-empty string")
+    incoming.name = incoming.name.strip()
 
     try:
-        calories_per_60_min = float(calories_per_60_min)
+        calories = float(incoming.calories_per_60_min)
     except (TypeError, ValueError):
-        return jsonify({"error": "calories_per_60_min must be a number"}), 400
+        return error("calories_per_60_min must be a number")
+    if calories <= 0:
+        return error("calories_per_60_min must be greater than 0")
+    if calories == int(calories):
+        calories = int(calories)
+    incoming.calories_per_60_min = calories
 
-    if calories_per_60_min <= 0:
-        return jsonify({"error": "calories_per_60_min must be greater than 0"}), 400
+    activity_records = create_activity_records(read_json("data/activities.json", []))
+    if any(row.name == incoming.name for row in activity_records):
+        return error("activity already exists")
 
-    if calories_per_60_min == int(calories_per_60_min):
-        calories_per_60_min = int(calories_per_60_min)
-
-    activities_file = open("data/activities.json", "r")
-    activities = json.loads(activities_file.read())
-    activities_file.close()
-
-    for row in activities:
-        if row["name"] == name:
-            return jsonify({"error": "activity already exists"}), 400
-
-    entry = {"name": name, "calories_per_60_min": calories_per_60_min}
-    activities.append(entry)
-
-    out = open("data/activities.json", "w")
-    out.write(json.dumps(activities, indent=2))
-    out.close()
-
-    print("saved activity", entry)
-    return jsonify(entry), 201
+    activity_records.append(
+        create_activity_record(incoming.name, incoming.calories_per_60_min)
+    )
+    write_json(
+        "data/activities.json",
+        [
+            {
+                "name": row.name,
+                CAL_PER_HOUR: row.calories_per_60_min,
+            }
+            for row in activity_records
+        ],
+    )
+    response = create_activity_response(incoming)
+    return jsonify(asdict(response)), 201
 
 
 @app.route("/calories", methods=["GET"])
@@ -296,69 +232,43 @@ def calories():
 
 
 def _calories():
-    print("got a calories request", request.args)
-    period = request.args.get("period")
+    incoming = create_period_request(request.args.get("period"))
     now = datetime.now()
-
-    if period == "day":
-        start = now - timedelta(days=1)
-    elif period == "week":
-        start = now - timedelta(days=7)
-    elif period == "month":
-        start = now - timedelta(days=30)
-    else:
-        return jsonify({"error": "period must be day, week or month"}), 400
-
     try:
-        logs_file = open("data/logs.json", "r")
-        logs = json.loads(logs_file.read())
-        logs_file.close()
-    except Exception as err:
-        print("could not read logs", err)
-        logs = []
+        period = Period(incoming.period)
+    except ValueError:
+        return error("period must be day, week or month")
 
+    if period == Period.DAY:
+        start = now - timedelta(days=1)
+    elif period == Period.WEEK:
+        start = now - timedelta(days=7)
+    else:
+        start = now - timedelta(days=30)
+
+    log_records = create_log_records(read_json("data/logs.json", []))
+    activity_records = create_activity_records(read_json("data/activities.json", []))
     total = 0
     matched = []
-    for item in logs:
-        when = datetime.strptime(item["logged_at"], "%Y-%m-%dT%H:%M:%S")
-        if when < start or when > now:
+    for item in log_records:
+        when = datetime.strptime(item.logged_at, "%Y-%m-%dT%H:%M:%S")
+        if not (start <= when <= now):
             continue
-
-        activities_file = open("data/activities.json", "r")
-        activities = json.loads(activities_file.read())
-        activities_file.close()
-
-        per_hour = None
-        for row in activities:
-            if row["name"] == item["type"]:
-                per_hour = row["calories_per_60_min"]
-                break
-
-        if per_hour is None:
-            print("skipping unknown activity", item["type"])
-            continue
-
-        burned = int(round(per_hour * float(item["minutes"]) / 60))
-        total = total + burned
-        matched.append(
-            {
-                "type": item["type"],
-                "minutes": item["minutes"],
-                "logged_at": item["logged_at"],
-                "calories": burned,
-            }
+        row = next(
+            (activity for activity in activity_records if activity.name == item.type),
+            None,
         )
+        if row is None:
+            continue
+        burned = burned_calories(row.calories_per_60_min, item.minutes)
+        total += burned
+        matched.append(create_calories_log(item, burned))
 
-    return jsonify(
-        {
-            "period": period,
-            "from": start.strftime("%Y-%m-%dT%H:%M:%S"),
-            "to": now.strftime("%Y-%m-%dT%H:%M:%S"),
-            "total_calories": total,
-            "count": len(matched),
-            "logs": matched,
-        }
-    )
+    builder = CaloriesResponseBuilder()
+    builder.set_window(period, start, now)
+    builder.add_totals(total, len(matched))
+    builder.add_logs(matched)
+    return jsonify(builder.get_result().to_dict())
 
 
 @app.route("/user", methods=["POST"])
@@ -368,35 +278,33 @@ def save_user():
 
 
 def _save_user():
-    print("got a save user request", request.args)
-    age = request.args.get("age")
-    gender = request.args.get("gender")
-    weight_kg = request.args.get("weight_kg")
-    height_cm = request.args.get("height_cm")
-    goal = request.args.get("goal")
-
-    if (
-        age is None
-        or gender is None
-        or weight_kg is None
-        or height_cm is None
-        or goal is None
+    incoming = create_user_request(
+        request.args.get("age"),
+        request.args.get("gender"),
+        request.args.get("weight_kg"),
+        request.args.get("height_cm"),
+        request.args.get("goal"),
+    )
+    if any(
+        value is None
+        for value in (
+            incoming.age,
+            incoming.gender,
+            incoming.weight_kg,
+            incoming.height_cm,
+            incoming.goal,
+        )
     ):
-        return jsonify(
-            {"error": "age, gender, weight_kg, height_cm and goal are required"}
-        ), 400
+        return error("age, gender, weight_kg, height_cm and goal are required")
 
     try:
-        age = float(age)
-        weight_kg = float(weight_kg)
-        height_cm = float(height_cm)
+        age = float(incoming.age)
+        weight_kg = float(incoming.weight_kg)
+        height_cm = float(incoming.height_cm)
     except (TypeError, ValueError):
-        return jsonify({"error": "age, weight_kg and height_cm must be numbers"}), 400
-
+        return error("age, weight_kg and height_cm must be numbers")
     if age <= 0 or weight_kg <= 0 or height_cm <= 0:
-        return jsonify(
-            {"error": "age, weight_kg and height_cm must be greater than 0"}
-        ), 400
+        return error("age, weight_kg and height_cm must be greater than 0")
 
     if age == int(age):
         age = int(age)
@@ -405,28 +313,25 @@ def _save_user():
     if height_cm == int(height_cm):
         height_cm = int(height_cm)
 
-    gender = gender.strip().lower()
-    if gender not in ("male", "female"):
-        return jsonify({"error": "gender must be male or female"}), 400
+    gender_text = incoming.gender.strip().lower()
+    try:
+        gender = Gender(gender_text)
+    except ValueError:
+        return error("gender must be male or female")
 
-    goal = goal.strip().lower()
+    goal = incoming.goal.strip().lower()
     if goal not in ("lose", "maintain", "gain"):
-        return jsonify({"error": "goal must be lose, maintain or gain"}), 400
+        return error("goal must be lose, maintain or gain")
 
-    saved = {
-        "age": age,
-        "gender": gender,
-        "weight_kg": weight_kg,
-        "height_cm": height_cm,
-        "goal": goal,
-    }
+    incoming.age = age
+    incoming.gender = gender.value
+    incoming.weight_kg = weight_kg
+    incoming.height_cm = height_cm
+    incoming.goal = goal
+    write_json("data/user.json", asdict(incoming))
 
-    out = open("data/user.json", "w")
-    out.write(json.dumps(saved, indent=2))
-    out.close()
-
-    print("saved user", saved)
-    return jsonify(saved), 200
+    response = create_user_profile_response(incoming)
+    return jsonify(asdict(response)), 200
 
 
 @app.route("/targets", methods=["GET"])
@@ -436,121 +341,101 @@ def daily_targets():
 
 
 def _daily_targets():
-    print("got a targets request", request.args)
-    period = request.args.get("period")
+    incoming = create_period_request(request.args.get("period"))
     now = datetime.now()
+    try:
+        period = Period(incoming.period)
+    except ValueError:
+        return error("period must be day, week or month")
 
-    if period == "day":
+    if period == Period.DAY:
         start = now - timedelta(days=1)
-    elif period == "week":
+    elif period == Period.WEEK:
         start = now - timedelta(days=7)
-    elif period == "month":
-        start = now - timedelta(days=30)
     else:
-        return jsonify({"error": "period must be day, week or month"}), 400
+        start = now - timedelta(days=30)
 
+    user_data = read_json("data/user.json", None)
+    if user_data is None:
+        return error("user is not saved")
+    required = ("age", "gender", "weight_kg", "height_cm", "goal")
+    if any(key not in user_data for key in required):
+        return error("saved user is missing details")
     try:
-        user_file = open("data/user.json", "r")
-        user = json.loads(user_file.read())
-        user_file.close()
-    except Exception as err:
-        print("could not read user", err)
-        return jsonify({"error": "user is not saved"}), 400
+        gender = Gender(user_data["gender"])
+    except ValueError:
+        return error("saved user gender is not supported")
 
-    if (
-        "age" not in user
-        or "gender" not in user
-        or "weight_kg" not in user
-        or "height_cm" not in user
-        or "goal" not in user
-    ):
-        return jsonify({"error": "saved user is missing details"}), 400
-
-    gender = user["gender"]
-    if gender not in ("male", "female"):
-        return jsonify({"error": "saved user gender is not supported"}), 400
-
-    try:
-        logs_file = open("data/logs.json", "r")
-        logs = json.loads(logs_file.read())
-        logs_file.close()
-    except Exception as err:
-        print("could not read logs", err)
-        logs = []
-
+    user_records = create_user_records(user_data)
+    saved_user = user_records[0]
+    log_records = create_log_records(read_json("data/logs.json", []))
+    activity_records = create_activity_records(read_json("data/activities.json", []))
     total = 0
-    for item in logs:
-        when = datetime.strptime(item["logged_at"], "%Y-%m-%dT%H:%M:%S")
-        if when < start or when > now:
+    for item in log_records:
+        when = datetime.strptime(item.logged_at, "%Y-%m-%dT%H:%M:%S")
+        if not (start <= when <= now):
             continue
+        row = next(
+            (activity for activity in activity_records if activity.name == item.type),
+            None,
+        )
+        if row is not None:
+            total += burned_calories(row.calories_per_60_min, item.minutes)
 
-        activities_file = open("data/activities.json", "r")
-        activities = json.loads(activities_file.read())
-        activities_file.close()
-
-        per_hour = None
-        for row in activities:
-            if row["name"] == item["type"]:
-                per_hour = row["calories_per_60_min"]
-                break
-
-        if per_hour is None:
-            print("skipping unknown activity", item["type"])
-            continue
-
-        burned = int(round(per_hour * float(item["minutes"]) / 60))
-        total = total + burned
-
-    if period == "day":
+    if period == Period.DAY:
         weekly_calories = total * 7
-    elif period == "week":
+    elif period == Period.WEEK:
         weekly_calories = total
     else:
         weekly_calories = int(round(total * 7 / 30))
 
-    level = "not active"
-    for name in ("not active", "little activity", "moderate", "active", "very active"):
+    level = ActivityLevel.NOT_ACTIVE
+    for name in (
+        ActivityLevel.NOT_ACTIVE,
+        ActivityLevel.LITTLE_ACTIVITY,
+        ActivityLevel.MODERATE,
+        ActivityLevel.ACTIVE,
+        ActivityLevel.VERY_ACTIVE,
+    ):
         band = LIFESTYLE_ACTIVITY[name][gender]
         if weekly_calories >= band["min_calories_per_week"]:
             level = name
 
     api_activity = ACTIVITY_FOR_API[level]
-    query = urllib.parse.urlencode(
-        {
-            "age": user["age"],
-            "gender": gender,
-            "weight_kg": user["weight_kg"],
-            "height_cm": user["height_cm"],
-            "activity": api_activity,
-            "goal": user["goal"],
-        }
+    query = create_macros_query(
+        saved_user.age,
+        gender.value,
+        saved_user.weight_kg,
+        saved_user.height_cm,
+        api_activity,
+        saved_user.goal,
     )
-    url = "https://calorieapiadmin.com/api/v1/public/calc/macros?" + query
-    print("calling", url)
-
+    query_string = urllib.parse.urlencode(asdict(query))
+    url = "https://calorieapiadmin.com/api/v1/public/calc/macros?" + query_string
     try:
         outgoing = urllib.request.Request(
-            url, headers={"User-Agent": "calorie-lab/1.0"}
+            url,
+            headers={"User-Agent": "calorie-lab/1.0"},
         )
         remote = urllib.request.urlopen(outgoing, timeout=10)
         payload = json.loads(remote.read().decode())
         remote.close()
     except Exception as err:
         print("macros api failed", err)
-        return jsonify({"error": "could not load daily targets"}), 502
+        return error("could not load daily targets"), 502
 
-    return jsonify(
-        {
-            "period": period,
-            "calories_burned": total,
-            "weekly_calories": weekly_calories,
-            "activity_level": level,
-            "activity": api_activity,
-            "daily_targets": payload.get("daily_targets"),
-            "bmr": payload.get("bmr"),
-            "tdee": payload.get("tdee"),
-        }
+    activity_level = level.value.replace("_", " ")
+    response = create_targets_response(
+        period,
+        total,
+        weekly_calories,
+        activity_level,
+        api_activity,
+        payload.get("daily_targets"),
+        payload.get("bmr"),
+        payload.get("tdee"),
     )
+    return jsonify(asdict(response))
 
 
 if __name__ == "__main__":

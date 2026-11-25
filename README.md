@@ -36,7 +36,24 @@ graph TB
         targets[GET targets]
     end
 
+    decorator[decorators/request_log.py]
+    requests[Requests singleton]
+    models[models/data.py]
+    enums[models/enums.py]
+    constants[models/const.py]
+    factories[factories/records.py]
+    caloriesBuilder[builders/calories_response.py]
+
     client --> Handlers
+    client -->|uses| decorator
+    decorator -->|uses| requests
+    Handlers -->|each call updates| requests
+    getCal -->|uses| caloriesBuilder
+    caloriesBuilder -->|creates| models
+    Handlers -->|use| factories
+    factories -->|creates| models
+    models -->|uses| enums
+    targets -->|uses| constants
     getAct ~~~ postAct
     postAct ~~~ postLog
     postLog ~~~ undo
@@ -60,9 +77,8 @@ graph TB
     targets -->|reads| user2[user.json]
     targets -->|reads| logs4[logs.json]
     targets -->|reads| a5[activities.json]
-    targets --> bands[LIFESTYLE_ACTIVITY]
-    bands --> names[ACTIVITY_FOR_API]
-    names -->|calls| macros[Macros API]
+    targets -->|uses| constants
+    constants -->|activity and lifestyle lookup| macros[Macros API]
     Handlers -->|each call updates| requests
 ```
 
@@ -311,4 +327,11 @@ The end-to-end test calls every endpoint, including invalid input, calorie windo
 ```bash
 source .venv/bin/activate
 python -m unittest test_e2e.py -v
+```
+
+On Windows (PowerShell), run the test with the project's virtual-environment
+interpreter directly:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest test_e2e.py -v
 ```
